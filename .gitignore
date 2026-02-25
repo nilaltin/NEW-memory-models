@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 outputs/
 slim stampen/data/*.csv
+
+# Allow Slim Stampen outputs folder
+!slim stampen/outputs/
+!slim stampen/outputs/*.csv
