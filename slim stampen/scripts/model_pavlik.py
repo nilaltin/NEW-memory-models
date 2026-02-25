@@ -108,7 +108,7 @@ def replay_pavlik_actr(
 def nll_pavlik_joint(theta, df, rt_only_correct=True, rt_in_ms=True):
     """
     theta = [phi, tau, s, T0, F]
-    RT likelihood: shifted log-logistic derived from logistic activation noise (Stocco slides).
+    RT likelihood: shifted log-logistic derived from logistic activation noise.
     """
     phi, tau, s, T0, F = theta
 
@@ -135,17 +135,37 @@ def nll_pavlik_joint(theta, df, rt_only_correct=True, rt_in_ms=True):
     rt_obs = pred["rt_obs"].to_numpy(dtype=float)
     A = pred["A"].to_numpy(dtype=float)
 
-    valid = np.isfinite(rt_obs) & np.isfinite(A) & (rt_obs > T0)
+   #valid = np.isfinite(rt_obs) & np.isfinite(A) & (rt_obs > T0)
+   # if rt_only_correct:
+   #     valid &= (y == 1)
+
+   # if not np.any(valid):
+   #     return float(nll_acc)
+   
+    valid_base = np.isfinite(rt_obs) & np.isfinite(A)
+    valid = valid_base & (rt_obs > T0)
+
     if rt_only_correct:
         valid &= (y == 1)
 
-    if not np.any(valid):
-        return float(nll_acc)
+# --- SMOOTH penalty for invalid RTs (rt_obs <= T0) ---
+    invalid = valid_base & (rt_obs <= T0)
+    if rt_only_correct:
+        invalid &= (y == 1)
 
-    # Slides: beta = sqrt(3) / (pi * s)
+    eps = 1e-6
+    lam = 500.0  # try 200–2000
+    viol = (T0 - rt_obs[invalid] + eps)
+    nll_penalty = lam * np.sum(viol * viol)
+
+# If no valid RTs remain, keep accuracy likelihood + penalty
+    if not np.any(valid):
+       return float(nll_acc + nll_penalty)
+
+    #beta = sqrt(3) / (pi * s)
     beta = np.sqrt(3.0) / (np.pi * s)
 
-    # Slides: alpha = e^{-A(m)}
+    #alpha = e^{-A(m)}
     alpha = np.exp(-A[valid])
 
     # x = (t - TER) / (F * alpha)
@@ -166,7 +186,8 @@ def nll_pavlik_joint(theta, df, rt_only_correct=True, rt_in_ms=True):
 
     nll_rt = -np.sum(log_pdf)
 
-    return float(nll_acc + nll_rt)
+ #  return float(nll_acc + nll_rt)
+    return float(nll_acc + nll_rt + nll_penalty)
 
 
 # ----------------------------
@@ -176,13 +197,20 @@ def fit_pavlik_model(df, rt_only_correct=True, rt_in_ms=True):
     # theta = [phi, tau, s, T0, F]
     x0 = np.array([0.5, 0.0, 1.0, 0.3, 0.5])
     bounds = [
-        (0.01, 2.0),   # phi
-        (-10, 10),     # tau
-        (0.05, 5.0),   # s
-        (0.0, 5.0),    # T0
-        (0.01, 10.0),  # F
+        (0.01, 2.0),    # phi
+        (-0.9, -0.7),   # tau
+        (0.23, 0.27),   # s
+        (0.05, 1.0),    # T0
+        (0.5, 2.0),     # F
     ]
 
     obj = lambda th: nll_pavlik_joint(th, df, rt_only_correct, rt_in_ms)
-    res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds)
+    #res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds)
+    res = minimize(
+        obj,
+        x0,
+        method="L-BFGS-B",
+        bounds=bounds,
+        options={"maxiter": 5000, "ftol": 1e-5}
+    )
     return res

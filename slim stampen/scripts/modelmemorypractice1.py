@@ -151,7 +151,7 @@ def replay_weighted_actr(
 # ----------------------------
 def nll_joint(theta, df, rt_only_correct=True, rt_in_ms=True):
     """
-    Option A (slide-correct):
+    Option A:
     theta = [d, w1, tau, s, T0, F]
 
     RT likelihood: Shifted log-logistic derived from logistic activation noise:
@@ -196,16 +196,37 @@ def nll_joint(theta, df, rt_only_correct=True, rt_in_ms=True):
     A = pred["A"].to_numpy(dtype=float)
 
     # RT must be > T0 due to shift
-    valid = np.isfinite(rt_obs) & np.isfinite(A) & (rt_obs > T0)
+   #valid = np.isfinite(rt_obs) & np.isfinite(A) & (rt_obs > T0)
+
+   # if rt_only_correct:
+      #  valid &= (y == 1)
+
+   # if not np.any(valid):
+       # return float(nll_acc)
+
+    valid_base = np.isfinite(rt_obs) & np.isfinite(A)
+    valid = valid_base & (rt_obs > T0)
 
     if rt_only_correct:
         valid &= (y == 1)
 
-    if not np.any(valid):
-        return float(nll_acc)
+# --- SMOOTH penalty for invalid RTs (rt_obs <= T0) ---
+    invalid = valid_base & (rt_obs <= T0)
+    if rt_only_correct:
+        invalid &= (y == 1)
 
-    beta = np.sqrt(3.0) / (np.pi * s)     # slide-correct
-    alpha = np.exp(-A[valid])             # slide-correct
+    eps = 1e-6
+    lam = 500.0  # try 200–2000
+    viol = (T0 - rt_obs[invalid] + eps)
+    nll_penalty = lam * np.sum(viol * viol)
+
+# If no valid RTs remain, keep accuracy likelihood + penalty
+    if not np.any(valid):
+        return float(nll_acc + nll_penalty)
+
+
+    beta = np.sqrt(3.0) / (np.pi * s)     
+    alpha = np.exp(-A[valid])             
 
     x = (rt_obs[valid] - T0) / (F * alpha)
 
@@ -223,8 +244,9 @@ def nll_joint(theta, df, rt_only_correct=True, rt_in_ms=True):
 
     nll_rt = -np.sum(log_pdf)
 
-    return float(nll_acc + nll_rt)
-
+    #return float(nll_acc + nll_rt)
+    
+    return float(nll_acc + nll_rt + nll_penalty)
 
 # ----------------------------
 # Fit wrapper
@@ -236,20 +258,29 @@ def fit_weighted_model(df, rt_only_correct=True, rt_in_ms=True):
     bounds = [
         (0.01, 1.50),   # d
         (1e-3, 200.0),  # w1
-        (-10, 10),      # tau
-        (0.05, 5.0),    # s
-        (0.0, 2.0),     # T0 (sec)
-        (1e-3, 10.0),   # F  (sec)
+        (-0.9, -0.7),   # tau
+        (0.23, 0.27),   # s
+        (0.05, 1.0),    # T0 (sec)
+        (0.5, 2.0),     # F  (sec)
     ]
 
     obj = lambda th: nll_joint(th, df, rt_only_correct, rt_in_ms)
+
+  #  res = minimize(
+  #      obj,
+  #      x0=x0,
+  #      method="L-BFGS-B",
+  #      bounds=bounds
+  #  )
 
     res = minimize(
         obj,
         x0=x0,
         method="L-BFGS-B",
-        bounds=bounds
+        bounds=bounds,
+        options={"maxiter": 7000, "ftol": 1e-5}
     )
+    
     return res
 
 

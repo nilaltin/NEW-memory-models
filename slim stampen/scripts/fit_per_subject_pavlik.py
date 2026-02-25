@@ -42,6 +42,10 @@ def main():
             "s": float(s),
             "T0": float(T0),
             "F": float(F),
+            "status": int(res.status),
+            "message": str(res.message),
+            "nit": int(res.nit),
+            "nfev": int(res.nfev),
         }
         results.append(row)
 
@@ -57,6 +61,10 @@ def main():
 
     print("\nSaved:", out_csv)
     print(out_df.head())
+
+    print("\nParameter ranges:")
+    for col in ["phi", "tau", "s", "T0", "F"]:
+        print(f"{col}: min={out_df[col].min():.4f}, max={out_df[col].max():.4f}")
 
 
 if __name__ == "__main__":
