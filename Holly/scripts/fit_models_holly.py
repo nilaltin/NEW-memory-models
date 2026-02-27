@@ -21,8 +21,8 @@ warnings.filterwarnings('ignore')
 # ─────────────────────────────────────────────
 # USER CONFIGURATION
 # ─────────────────────────────────────────────
-DATA_PATH  = '../data/newdata.csv'          # path to your CSV data file
-OUTPUT_DIR = '../outputs/pi_filtered'       # directory for output files
+DATA_PATH  = 'hollysdata_nil.csv'  # path to your CSV data file
+OUTPUT_DIR = '.'                            # directory for output files
 N_RESTARTS = 15                             # random restarts per subject/model
 N_WORKERS  = None                           # None = use all available CPU cores
 
@@ -36,11 +36,8 @@ BETA = np.sqrt(3) / (np.pi * S)   # ≈ 2.21, fixed
 # ─────────────────────────────────────────────
 # PARAMETER BOUNDS
 # ─────────────────────────────────────────────
-ACTR_PP_BOUNDS = [(0, 1), (0.3, 1), (0.5, 2)]   # c, t0, F
-ACTR_PF_BOUNDS = [(0, 1)]                         # phi per fact
-
-FEAR_PP_BOUNDS = [(0, 1), (0.3, 1), (0.5, 2)]   # d, t0, F
-FEAR_PF_BOUNDS = [(0, 10)]                        # w1 per fact
+ACTR_BOUNDS = [(0, 1), (0, 1), (0.3, 1), (0.5, 2)]   # c, phi, t0, F
+FEAR_BOUNDS = [(0, 1), (0, 10), (0.3, 1), (0.5, 2)]   # d, w1, t0, F
 
 
 # ─────────────────────────────────────────────
@@ -99,18 +96,14 @@ def log_lik_rt(rt_shifted, A, F):
             - 2 * np.log1p(z ** BETA))
 
 
-# ─────────────────────────────────────────────
-# ADDITIONS: prediction helpers
-# ─────────────────────────────────────────────
-
 def p_correct_from_A(A):
     p = float(sigmoid((A - TAU) / S))
     return float(np.clip(p, 1e-10, 1 - 1e-10))
 
+
 def rt_pred_from_A(A, t0, F):
     # matches your RT likelihood parameterization alpha = F * exp(-A)
     return float(t0 + F * np.exp(-A))
-
 
 # ─────────────────────────────────────────────
 # SEQUENCE PRE-PROCESSING
@@ -118,45 +111,42 @@ def rt_pred_from_A(A, t0, F):
 
 def build_fact_sequences(fact_df):
     """Convert a fact's trial rows into a list of (enc_snapshot, t_query, is_correct, rt_s)."""
-    rows = fact_df.sort_values('trial').reset_index(drop=True)
+    rows = fact_df.sort_values('repetition').reset_index(drop=True)
     enc_list = []
     queries  = []
     for _, row in rows.iterrows():
         t = row['time']
-        if row['type'] == 'study':
+        if row['repetition'] == 1:   # study trial
             enc_list.append(t)
         else:
             queries.append((np.array(enc_list, dtype=float), float(t),
-                            bool(row['isCorrect']), float(row['RT_s'])))
+                            bool(row['correct']), float(row['RT_s'])))
             enc_list.append(t)
     return queries
 
-
-# ─────────────────────────────────────────────
-# ADDITIONS: sequence builder with metadata for trial-by-trial saving
-# ─────────────────────────────────────────────
 
 def build_fact_sequences_with_meta(fact_df):
     """
     Like build_fact_sequences(), but returns dicts with metadata so we can save
     trial-by-trial predictions after fitting.
     """
-    rows = fact_df.sort_values('trial').reset_index(drop=True)
+    rows = fact_df.sort_values('repetition').reset_index(drop=True)
     enc_list = []
     out = []
     for _, row in rows.iterrows():
         t = float(row['time'])
-        if row['type'] == 'study':
+        rep = int(row['repetition'])
+        if rep == 1:  # study trial
             enc_list.append(t)
         else:
             out.append({
                 "enc_times": np.array(enc_list, dtype=float),
                 "t_query": t,
-                "correct": bool(row["isCorrect"]),
+                "correct": bool(row["correct"]),
                 "rt_s": float(row["RT_s"]),
-                "item": row["item"],
-                "trial": int(row["trial"]) if "trial" in row else None,
-                "type": row["type"],
+                "lesson": row["lesson"],
+                "fact": row["fact"],
+                "repetition": rep,
             })
             enc_list.append(t)
     return out
@@ -191,10 +181,8 @@ def _actr_objective(args):
     lowers = np.array([b[0] for b in bounds])
     uppers = np.array([b[1] for b in bounds])
     params = np.clip(params, lowers, uppers)
-    c, t0, F = params[0], params[1], params[2]
-    phis = params[3:]
-    total = sum(nll_fact_actr(seqs[fact], c, phis[k], t0, F)
-                for k, fact in enumerate(facts))
+    c, phi, t0, F = params[0], params[1], params[2], params[3]
+    total = sum(nll_fact_actr(seqs[fact], c, phi, t0, F) for fact in facts)
     return total if np.isfinite(total) else 1e9
 
 def _fear_objective(args):
@@ -202,10 +190,8 @@ def _fear_objective(args):
     lowers = np.array([b[0] for b in bounds])
     uppers = np.array([b[1] for b in bounds])
     params = np.clip(params, lowers, uppers)
-    d, t0, F = params[0], params[1], params[2]
-    w1s = params[3:]
-    total = sum(nll_fact_fear(seqs[fact], d, w1s[k], t0, F)
-                for k, fact in enumerate(facts))
+    d, w1, t0, F = params[0], params[1], params[2], params[3]
+    total = sum(nll_fact_fear(seqs[fact], d, w1, t0, F) for fact in facts)
     return total if np.isfinite(total) else 1e9
 
 
@@ -221,16 +207,22 @@ def _powell(objective, x0, bounds, coarse=False):
 def fit_participant(subj_data, facts, model, n_restarts=N_RESTARTS):
     """Fit one model ('actr' or 'fear') to one participant's data."""
     assert model in ('actr', 'fear')
-    bounds = (ACTR_PP_BOUNDS + ACTR_PF_BOUNDS * len(facts) if model == 'actr'
-              else FEAR_PP_BOUNDS + FEAR_PF_BOUNDS * len(facts))
+    # Set t0 upper bound to 95% of subject's fastest RT to avoid rt_shifted <= 0
+    min_rt = subj_data[subj_data['repetition'] > 1]['RT_s'].min()
+    t0_upper = min(0.95 * min_rt, 1.0)   # never exceed global upper bound of 1.0
+    t0_lower = min(0.3, t0_upper * 0.5)  # ensure lower < upper
+    bounds = list(ACTR_BOUNDS if model == 'actr' else FEAR_BOUNDS)
+    bounds[2] = (t0_lower, t0_upper)     # t0 is always index 2: [c/d, phi/w1, t0, F]
     lowers = np.array([b[0] for b in bounds])
     uppers = np.array([b[1] for b in bounds])
 
-    seqs = {fact: build_fact_sequences(subj_data[subj_data['item'] == fact])
+    # facts may be (lesson, fact) tuples or plain ints -- filter accordingly
+    fact_col = 'fact_uid' if 'fact_uid' in subj_data.columns else 'item'
+    seqs = {fact: build_fact_sequences(subj_data[subj_data[fact_col] == fact])
             for fact in facts}
 
-    obj_fn  = _actr_objective if model == 'actr' else _fear_objective
-    obj     = lambda p: obj_fn((p, seqs, facts, bounds))
+    obj_fn = _actr_objective if model == 'actr' else _fear_objective
+    obj    = lambda p: obj_fn((p, seqs, facts, bounds))
 
     rng  = np.random.default_rng(42)
     best = None
@@ -249,26 +241,28 @@ def fit_participant(subj_data, facts, model, n_restarts=N_RESTARTS):
 # ─────────────────────────────────────────────
 
 def _fit_subject(args):
-    """Fit both models for one subject. Called by process pool."""
+    """Fit both models for one subject across all their lessons. Called by process pool."""
     subj, subj_data, n_restarts = args
-    facts  = sorted(subj_data['item'].unique())
-    n_test = len(subj_data[subj_data['type'] == 'test'])
+    # Facts are unique per (subject, lesson) -- encode as (lesson, fact) tuples
+    subj_data = subj_data.copy()
+    subj_data['fact_uid'] = list(zip(subj_data['lesson'], subj_data['fact']))
+    facts  = sorted(subj_data['fact_uid'].unique())
+    n_test = len(subj_data[subj_data['repetition'] > 1])
 
     res_a = fit_participant(subj_data, facts, 'actr', n_restarts)
     res_f = fit_participant(subj_data, facts, 'fear', n_restarts)
 
     actr = {
         'nll': float(res_a.fun), 'c': float(res_a.x[0]),
-        't0': float(res_a.x[1]), 'F': float(res_a.x[2]),
-        'phi': {int(f): float(res_a.x[3+k]) for k, f in enumerate(facts)},
-        'n_params': 3 + len(facts), 'converged': bool(res_a.success)
+        'phi': float(res_a.x[1]), 't0': float(res_a.x[2]), 'F': float(res_a.x[3]),
+        'n_params': 4, 'converged': bool(res_a.success)
     }
     fear = {
         'nll': float(res_f.fun), 'd': float(res_f.x[0]),
-        't0': float(res_f.x[1]), 'F': float(res_f.x[2]),
-        'w1': {int(f): float(res_f.x[3+k]) for k, f in enumerate(facts)},
-        'n_params': 3 + len(facts), 'converged': bool(res_f.success)
+        'w1': float(res_f.x[1]), 't0': float(res_f.x[2]), 'F': float(res_f.x[3]),
+        'n_params': 4, 'converged': bool(res_f.success)
     }
+
 
     # ─── Trial-by-trial predictions (one forward pass per subject) ───
     os.makedirs(OUTPUT_DIR, exist_ok=True)  # ensure worker can write
@@ -276,21 +270,19 @@ def _fit_subject(args):
     os.makedirs(pred_dir, exist_ok=True)
 
     pred_rows = []
-    for fact in facts:
-        fact_df = subj_data[subj_data["item"] == fact]
+    for fact_uid in facts:
+        fact_df = subj_data[subj_data["fact_uid"] == fact_uid]
         trials = build_fact_sequences_with_meta(fact_df)
 
-        phi = actr["phi"][int(fact)]
-        w1  = fear["w1"][int(fact)]
-
         for q in trials:
-            A_a = compute_activation_actr(q["enc_times"], q["t_query"], actr["c"], phi)
-            A_f = compute_activation_fear(q["enc_times"], q["t_query"], fear["d"], w1)
+            A_a = compute_activation_actr(q["enc_times"], q["t_query"], actr["c"], actr["phi"])
+            A_f = compute_activation_fear(q["enc_times"], q["t_query"], fear["d"], fear["w1"])
 
             pred_rows.append({
-                "subj": subj,
-                "item": q["item"],
-                "trial": q["trial"],
+                "subject": subj,
+                "lesson": q["lesson"],
+                "fact": q["fact"],
+                "repetition": q["repetition"],
                 "time": q["t_query"],
                 "correct_obs": int(q["correct"]),
                 "rt_obs_s": q["rt_s"],
@@ -311,7 +303,6 @@ def _fit_subject(args):
 
     return subj, n_test, facts, actr, fear
 
-
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
@@ -320,18 +311,20 @@ def main():
     print("Loading and filtering data...")
     df = pd.read_csv(DATA_PATH)
     df['RT_s'] = df['RT'] / 1000.0
-    test_mask = df['type'] == 'test'
-    rt_mask   = (df['RT_s'] >= 0.2) & (df['RT_s'] <= 10.0)
+
+    # Study trials = repetition 1; apply RT filter only to test trials
+    test_mask = df['repetition'] > 1
+    rt_mask   = (df['RT_s'] >= 0.2) & (df['RT_s'] <= 15.0)
     n_before  = len(df)
     df        = df[~test_mask | rt_mask].copy()
     print(f"Trials: {n_before} → {len(df)} ({n_before - len(df)} outliers removed)")
 
-    subjects  = sorted(df['subj'].unique())
+    subjects  = sorted(df['subject'].unique())
     n_workers = N_WORKERS or cpu_count()
     print(f"Subjects: {len(subjects)} | Workers: {n_workers} | Restarts: {N_RESTARTS}")
 
     # Build per-subject args (DataFrames are picklable)
-    job_args = [(subj, df[df['subj'] == subj].copy(), N_RESTARTS)
+    job_args = [(subj, df[df['subject'] == subj].copy(), N_RESTARTS)
                 for subj in subjects]
 
     t_start = time.time()
@@ -351,10 +344,8 @@ def main():
     rows = []
 
     for subj, n_test, facts, actr, fear in results:
-        actr_results[int(subj)] = actr
-        fear_results[int(subj)] = fear
-      #  actr_results[subj] = actr
-      #  fear_results[subj] = fear
+        actr_results[str(subj)] = actr
+        fear_results[str(subj)] = fear
 
         aic_a = 2 * actr['n_params'] + 2 * actr['nll']
         aic_f = 2 * fear['n_params'] + 2 * fear['nll']
@@ -369,7 +360,8 @@ def main():
             'bic_actr': bic_a,                'bic_fear': bic_f,
             'delta_aic': aic_f - aic_a,
             'delta_bic': bic_f - bic_a,
-            'c': actr['c'],      'd': fear['d'],
+            'c': actr['c'], 'phi': actr['phi'],
+            'd': fear['d'], 'w1': fear['w1'],
             't0_actr': actr['t0'], 'F_actr': actr['F'],
             't0_fear': fear['t0'], 'F_fear': fear['F'],
             'converged_actr': actr['converged'],
@@ -380,10 +372,10 @@ def main():
 
     # ─── Save outputs ───
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    summary.to_csv(os.path.join(OUTPUT_DIR, 'model_comparison_summary.csv'), index=False)
-    with open(os.path.join(OUTPUT_DIR, 'actr_results.json'), 'w') as fp:
+    summary.to_csv(os.path.join(OUTPUT_DIR, 'holly_model_comparison_summary.csv'), index=False)
+    with open(os.path.join(OUTPUT_DIR, 'holly_actr_results.json'), 'w') as fp:
         json.dump(actr_results, fp, indent=2)
-    with open(os.path.join(OUTPUT_DIR, 'fear_results.json'), 'w') as fp:
+    with open(os.path.join(OUTPUT_DIR, 'holly_fear_results.json'), 'w') as fp:
         json.dump(fear_results, fp, indent=2)
 
     # ─── Print summary ───
